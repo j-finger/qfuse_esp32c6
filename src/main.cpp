@@ -482,7 +482,7 @@ static void uart_event_task(void *pvParameters)
                                 } else if (received_json.contains("log")) {
                                     topic = "sensor/log";
                                 } else {
-                                    topic = "sensor/unknown";
+                                    topic = "sensor/data";
                                 }
 
                                 // Publish the JSON data via MQTT
