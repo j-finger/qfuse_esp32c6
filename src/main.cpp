@@ -48,9 +48,12 @@ static esp_mqtt_client_handle_t mqtt_client = NULL;
 #define UART_NUM UART_NUM_1
 #define TXD_PIN GPIO_NUM_16
 #define RXD_PIN GPIO_NUM_17
-#define BAUD_RATE 1152000
-#define UART_BUFFER_SIZE (25024) // UART Buffer Sizes
+#define BAUD_RATE 921600
+#define UART_BUFFER_SIZE (16384) // UART Buffer Sizes
+
 static QueueHandle_t uart_queue; // UART Event Queue
+static QueueHandle_t json_queue; // JSON Queue
+
 
 #define LED_PIN GPIO_NUM_15
 /* ----- WIFI ----- */
@@ -329,6 +332,11 @@ void mqtt_app_start(void)
     esp_mqtt_client_config_t mqtt_cfg = {};
     mqtt_cfg.broker.address.uri = MQTT_URI;  // Set each field individually
 
+    mqtt_cfg.outbox.limit = 65536;
+
+    mqtt_cfg.buffer.size = 16384;     // Input buffer size
+    mqtt_cfg.buffer.out_size = 16384; // Output buffer size
+
     mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
 
     if (mqtt_client == NULL) {
@@ -353,7 +361,6 @@ void mqtt_app_start(void)
         ESP_LOGE(TAG, "Failed to register MQTT_EVENT_PUBLISHED handler");
     }
 
-    // You can register more events if needed, such as MQTT_EVENT_DATA, MQTT_EVENT_ERROR, etc.
 
     // Start the MQTT client
     err = esp_mqtt_client_start(mqtt_client);
@@ -407,83 +414,148 @@ void uart_read(char* message, size_t max_length) {
     }
 }
 
-// Function to handle UART events
+
+static void json_processing_task(void *pvParameters)
+{
+    std::string* json_str;
+    while (true) {
+        if (xQueueReceive(json_queue, &json_str, portMAX_DELAY)) {
+            // Optional: Limit logging
+            ESP_LOGI(TAG, "Processing JSON of length %d", json_str->length());
+
+            if (json::accept(*json_str)) {
+                json received_json = json::parse(*json_str);
+                mqtt_publish(mqtt_client, "sensor/data", received_json);
+            } else {
+                ESP_LOGE(TAG, "JSON Parse Error: Invalid JSON format");
+            }
+            delete json_str; // Free allocated memory
+        }
+    }
+}
+
+
+// // Function to handle UART events
 static void uart_event_task(void *pvParameters)
 {
     uart_event_t event;
     char incoming_byte;
-    std::string uart_buffer = ""; // Initialize an empty buffer to accumulate incoming data
+    std::string uart_buffer;
 
     while (true) {
-        // Wait for UART event.
         if (xQueueReceive(uart_queue, (void *)&event, (TickType_t)portMAX_DELAY)) {
             switch (event.type) {
                 case UART_DATA: {
-                    // Read incoming bytes one by one
-                    while (uart_read_bytes(UART_NUM, (uint8_t *)&incoming_byte, 1, 0) > 0) {
+                    int rx_bytes = event.size;
+                    uint8_t* data = (uint8_t*) malloc(rx_bytes);
+                    int read_bytes = uart_read_bytes(UART_NUM, data, rx_bytes, portMAX_DELAY);
+                    for (int i = 0; i < read_bytes; i++) {
+                        incoming_byte = data[i];
                         if (incoming_byte == '\n') {
-                            // End of JSON message
                             if (!uart_buffer.empty()) {
-                                // ESP_LOGI(TAG, "Received complete JSON: %s", uart_buffer.c_str());
-                                printf("Received complete JSON\n");
-                                // Check if the received string is valid JSON
-                                if (json::accept(uart_buffer)) {
-                                    // Parse the JSON string
-                                    json received_json = json::parse(uart_buffer);
-                                    
-                                    // Process the JSON object as needed
-                                    // For example, publish to MQTT
-                                    mqtt_publish(mqtt_client, "sensor/data", received_json);
+                                // Allocate memory for the JSON string
+                                std::string* json_str = new std::string(uart_buffer);
+                                if (xQueueSend(json_queue, &json_str, portMAX_DELAY) != pdPASS) {
+                                    ESP_LOGE(TAG, "Failed to enqueue JSON string");
+                                    delete json_str; // Free memory if enqueue fails
                                 }
-                                else {
-                                    // ESP_LOGE(TAG, "JSON Parse Error: Invalid JSON format");
-                                    printf("JSON Parse Error: Invalid JSON format\n");
-                                }
-                                
-                                // Clear the buffer for the next message
                                 uart_buffer.clear();
                             }
-                        }
-                        else {
-                            // Accumulate the incoming byte
+                        } else {
                             uart_buffer += incoming_byte;
                         }
                     }
+                    free(data);
                     break;
                 }
                 // Handle other UART events as needed
-                case UART_FIFO_OVF:
-                    ESP_LOGI(TAG, "UART FIFO Overflow");
-                    uart_flush_input(UART_NUM);
-                    xQueueReset(uart_queue);
-                    break;
-
-                case UART_BUFFER_FULL:
-                    ESP_LOGI(TAG, "UART Buffer Full");
-                    uart_flush_input(UART_NUM);
-                    xQueueReset(uart_queue);
-                    break;
-
-                case UART_BREAK:
-                    ESP_LOGI(TAG, "UART Break");
-                    break;
-
-                case UART_PARITY_ERR:
-                    ESP_LOGI(TAG, "UART Parity Error");
-                    break;
-
-                case UART_FRAME_ERR:
-                    ESP_LOGI(TAG, "UART Frame Error");
-                    break;
-
                 default:
-                    ESP_LOGI(TAG, "UART event type: %d", event.type);
                     break;
             }
         }
     }
     vTaskDelete(NULL);
 }
+
+
+
+// // Function to handle UART events
+// static void uart_event_task(void *pvParameters)
+// {
+//     uart_event_t event;
+//     char incoming_byte;
+//     std::string uart_buffer = ""; // Initialize an empty buffer to accumulate incoming data
+
+//     while (true) {
+//         // Wait for UART event.
+//         if (xQueueReceive(uart_queue, (void *)&event, (TickType_t)portMAX_DELAY)) {
+//             switch (event.type) {
+//                 case UART_DATA: {
+//                     // Read incoming bytes one by one
+//                     while (uart_read_bytes(UART_NUM, (uint8_t *)&incoming_byte, 1, 0) > 0) {
+//                         if (incoming_byte == '\n') {
+//                             // End of JSON message
+//                             if (!uart_buffer.empty()) {
+//                                 // ESP_LOGI(TAG, "Received complete JSON: %s", uart_buffer.c_str());
+//                                 printf("Received complete JSON\n");
+//                                 // Check if the received string is valid JSON
+//                                 if (json::accept(uart_buffer)) {
+//                                     // Parse the JSON string
+//                                     json received_json = json::parse(uart_buffer);
+                                    
+//                                     // Process the JSON object as needed
+//                                     // For example, publish to MQTT
+//                                     mqtt_publish(mqtt_client, "sensor/data", received_json);
+//                                 }
+//                                 else {
+//                                     // ESP_LOGE(TAG, "JSON Parse Error: Invalid JSON format");
+//                                     printf("JSON Parse Error: Invalid JSON format\n");
+//                                 }
+                                
+//                                 // Clear the buffer for the next message
+//                                 uart_buffer.clear();
+//                             }
+//                         }
+//                         else {
+//                             // Accumulate the incoming byte
+//                             uart_buffer += incoming_byte;
+//                         }
+//                     }
+//                     break;
+//                 }
+//                 // Handle other UART events as needed
+//                 case UART_FIFO_OVF:
+//                     ESP_LOGI(TAG, "UART FIFO Overflow");
+//                     uart_flush_input(UART_NUM);
+//                     xQueueReset(uart_queue);
+//                     break;
+
+//                 case UART_BUFFER_FULL:
+//                     ESP_LOGI(TAG, "UART Buffer Full");
+//                     uart_flush_input(UART_NUM);
+//                     xQueueReset(uart_queue);
+//                     break;
+
+//                 case UART_BREAK:
+//                     ESP_LOGI(TAG, "UART Break");
+//                     break;
+
+//                 case UART_PARITY_ERR:
+//                     ESP_LOGI(TAG, "UART Parity Error");
+//                     break;
+
+//                 case UART_FRAME_ERR:
+//                     ESP_LOGI(TAG, "UART Frame Error");
+//                     break;
+
+//                 default:
+//                     ESP_LOGI(TAG, "UART event type: %d", event.type);
+//                     break;
+//             }
+//         }
+//     }
+//     vTaskDelete(NULL);
+// }
 
 
 // Function to initialize the LED pin
@@ -501,7 +573,7 @@ void init_led_pin(void) {
 // Function to blink the LED
 void blink_led(void) {
     gpio_set_level(LED_PIN, 0);  // Pull low
-    vTaskDelay(400 / portTICK_PERIOD_MS);  // Delay 1 second
+    vTaskDelay(250 / portTICK_PERIOD_MS);  // Delay 1 second
     gpio_set_level(LED_PIN, 1);  // Pull high
 }
 
@@ -510,8 +582,12 @@ void blink_led(void) {
 
 extern "C" void app_main(void)
 {
+    
     init_led_pin();
     
+
+
+
     blink_led();
     // Sleep for 8 seconds before starting
     vTaskDelay(8000 / portTICK_PERIOD_MS);
@@ -532,6 +608,7 @@ extern "C" void app_main(void)
     // MQTT Initialization
     blink_led();
     mqtt_app_start(); // Start the MQTT client
+
     // Log MQTT initialization to sensor/log
     blink_led();
     json log_json;
@@ -541,20 +618,28 @@ extern "C" void app_main(void)
     mqtt_publish(mqtt_client, "sensor/logs", log_json);
     ESP_LOGI(TAG, "MQTT client started");
 
-
     // UART Initialization
     blink_led();
     uart_initialize(); // Initialize UART
+
+    blink_led();
+    // Initialize the queue before starting tasks
+    json_queue = xQueueCreate(10, sizeof(std::string*)); // Adjust the queue length as needed
+    if (json_queue == NULL) {
+        ESP_LOGE(TAG, "Failed to create JSON queue");
+    }
+    
+    // Start UART Event Task
+    blink_led();
+    xTaskCreate(json_processing_task, "json_processing_task", 16384, NULL, 12, NULL);
+    // Start UART Event Task
+    blink_led();
+    xTaskCreate(uart_event_task, "uart_event_task", 16384, NULL, 10, NULL);
     
     gpio_set_level(LED_PIN, 0);  // Pull low
-    uart_send("Clear\n");  // Implementation of the TODO
-    // TODO: Send the message 'Connected' over UART
-    uart_send("Connected\n");  // Implementation of the TODO
-    printf("Clear\n");
-    printf("Connected\n");
-    printf("Connected");
-    // Start UART Event Task
-    xTaskCreate(uart_event_task, "uart_event_task", 8192, NULL, 12, NULL);
+
+    uart_send("Clear\nConnected\n");  // Implementation of the TODO    printf("Clear\n");
+    printf("Clear\nConnected\n");
 
     // Delete the main task if not needed
     vTaskDelete(NULL);
