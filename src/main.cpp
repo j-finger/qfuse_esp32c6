@@ -1,29 +1,3 @@
-// #include "freertos/FreeRTOS.h"
-// #include "freertos/task.h"
-// #include "freertos/queue.h"
-// #include "esp_log.h"
-// #include "driver/gpio.h" 
-// #include "driver/uart.h"
-
-// #include "nvs_flash.h"
-// #include "esp_event.h"
-// #include "esp_system.h"
-
-// #include "esp_wifi.h"
-// #include "esp_netif.h"
-// #include "esp_sntp.h"
-
-// #include "mqtt_client.h"
-
-
-// #include <stdio.h>
-// #include <string>
-// #include <string.h>
-// #include <time.h>
-// #include <ctime>
-// #include <cstring>
-// #include <cstdio>
-
 // main.cpp
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -59,8 +33,8 @@ static const char *TAG = "ESP_coms";
 /* ----- MQTT MACROS ----- */
 static esp_mqtt_client_handle_t mqtt_client = NULL;
 #define MQTT_URI       "mqtt://192.168.86.20:1883"
-#define MQTT_BUFF_IN_SIZE (16384)
-#define MQTT_BUFF_OUT_SIZE (2048)
+#define MQTT_BUFF_IN_SIZE (2048)
+#define MQTT_BUFF_OUT_SIZE (26384) 
 #define MQTT_OUTBOX_SIZE (16384)
 
 // #define MQTT_URI       "mqtt://192.168.4.1:1883"
@@ -71,13 +45,32 @@ static esp_mqtt_client_handle_t mqtt_client = NULL;
 #define TXD_PIN GPIO_NUM_16
 #define RXD_PIN GPIO_NUM_17
 #define BAUD_RATE 921600
-#define UART_RX_BUFFER_SIZE (16384) // Reduced RX buffer size
+#define UART_RX_BUFFER_SIZE (26384) // Reduced RX buffer size
 #define UART_TX_BUFFER_SIZE (2048) // Reduced TX buffer size
 
 static QueueHandle_t uart_queue; // UART Event Queue
 static QueueHandle_t json_queue; // JSON Queue
 
 #define LED_PIN GPIO_NUM_15
+
+
+#include <sys/time.h>  // Include necessary header for settimeofday
+
+bool time_synced = false;  // Global variable to indicate if time is synchronized
+
+void set_system_time(int64_t epoch_time) {
+    struct timeval tv;
+    tv.tv_sec = epoch_time;
+    tv.tv_usec = 0;
+
+    int res = settimeofday(&tv, NULL);
+    if (res != 0) {
+        ESP_LOGE(TAG, "Failed to set system time");
+    } else {
+        ESP_LOGI(TAG, "System time set to: %lld", (long long)epoch_time);
+        time_synced = true;
+    }
+}
 
 
 /* ----- JSON ----- */
@@ -97,9 +90,11 @@ void json_append_time(json& json_obj) {
 // Function to subscribe to required MQTT topics
 void mqtt_sub_topics(esp_mqtt_client_handle_t client) {
     // Subscribe to necessary topics
-    esp_mqtt_client_subscribe(client, "sensor/settings", 1);
-    esp_mqtt_client_subscribe(client, "sensor/data", 1);
-    esp_mqtt_client_subscribe(client, "sensor/logs", 1);
+    // esp_mqtt_client_subscribe(client, "sensor/settings", 1);
+    // esp_mqtt_client_subscribe(client, "sensor/data", 1);
+    // esp_mqtt_client_subscribe(client, "sensor/logs", 1);
+    esp_mqtt_client_subscribe(client, "time/response", 1);
+    // esp_mqtt_client_subscribe(client, "time", 1);
 
     ESP_LOGI(TAG, "Subscribed to topics: 'sensor/settings', 'sensor/data', 'sensor/logs'");
 }
@@ -139,9 +134,19 @@ void mqtt_handle_message(esp_mqtt_event_handle_t event) {
     ESP_LOGI(TAG, "Received message on topic: %s", topic.c_str());
     ESP_LOGI(TAG, "Message data: %s", data.c_str());
 
-    // Process the message as needed
-    // For now, we can just log it or handle settings updates
+    if (topic == "time/response") {
+        ESP_LOGI(TAG, "Handling time response");
+        json time_json = json::parse(data);
+        if (time_json.contains("time")) {
+            int64_t time_epoch = time_json["time"];
+            set_system_time(time_epoch);
+        } else {
+            ESP_LOGE(TAG, "Time response does not contain 'time' field");
+        }
+    }
+    // You can keep handling other topics as needed
 }
+
 
 // Function to handle MQTT connection events
 void mqtt_handle_connection(esp_mqtt_event_handle_t event) {
@@ -153,7 +158,11 @@ void mqtt_handle_connection(esp_mqtt_event_handle_t event) {
         // Subscribe to MQTT topics
         mqtt_sub_topics(client);
 
-        // TODO: Implement manual JSON creation here
+        // Publish to 'time/request' to request current time
+        esp_mqtt_client_publish(client, "time/request", "", 0, 1, 0);
+        ESP_LOGI(TAG, "Published time request to 'time/request'");
+
+        // Publish a log message to 'sensor/logs'
         json log_json;
         log_json["device"] = "E46338809B472231"; // Replace with your device ID
         log_json["log"] = "Device connected to MQTT broker";
@@ -162,7 +171,6 @@ void mqtt_handle_connection(esp_mqtt_event_handle_t event) {
 
     } else if (event->event_id == MQTT_EVENT_DISCONNECTED) {
         ESP_LOGI(TAG, "MQTT_EVENT_DISCONNECTED");
-
         // Handle disconnection logic if necessary
     }
 }
@@ -230,6 +238,10 @@ void mqtt_app_start(void)
         ESP_LOGE(TAG, "Failed to register MQTT_EVENT_PUBLISHED handler");
     }
 
+    err = esp_mqtt_client_register_event(mqtt_client, MQTT_EVENT_ANY, mqtt_event_handler, NULL);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register MQTT event handler");
+    }
 
     // Start the MQTT client
     err = esp_mqtt_client_start(mqtt_client);
@@ -257,7 +269,7 @@ void uart_initialize(void) {
 
     ESP_ERROR_CHECK(uart_param_config(uart_num, &uart_config)); // Configure UART parameters
     ESP_ERROR_CHECK(uart_set_pin(uart_num, TXD_PIN, RXD_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE)); // Set UART pins
-    ESP_ERROR_CHECK(uart_driver_install(uart_num, UART_RX_BUFFER_SIZE, UART_TX_BUFFER_SIZE, 10, &uart_queue, 0)); // Install UART driver using an event queue here
+    ESP_ERROR_CHECK(uart_driver_install(uart_num, UART_RX_BUFFER_SIZE, UART_TX_BUFFER_SIZE, 5, &uart_queue, 0)); // Install UART driver using an event queue here
 
     uart_enable_rx_intr(uart_num); // Configure UART to receive interrupt on RX full
 }
@@ -355,7 +367,6 @@ static void uart_event_task(void *pvParameters)
 //     uart_event_t event;
 //     char incoming_byte;
 //     std::string uart_buffer = ""; // Initialize an empty buffer to accumulate incoming data
-
 //     while (true) {
 //         // Wait for UART event.
 //         if (xQueueReceive(uart_queue, (void *)&event, (TickType_t)portMAX_DELAY)) {
@@ -371,8 +382,7 @@ static void uart_event_task(void *pvParameters)
 //                                 // Check if the received string is valid JSON
 //                                 if (json::accept(uart_buffer)) {
 //                                     // Parse the JSON string
-//                                     json received_json = json::parse(uart_buffer);
-                                    
+//                                     json received_json = json::parse(uart_buffer);                               
 //                                     // Process the JSON object as needed
 //                                     // For example, publish to MQTT
 //                                     mqtt_publish(mqtt_client, "sensor/data", received_json);
@@ -380,8 +390,7 @@ static void uart_event_task(void *pvParameters)
 //                                 else {
 //                                     // ESP_LOGE(TAG, "JSON Parse Error: Invalid JSON format");
 //                                     printf("JSON Parse Error: Invalid JSON format\n");
-//                                 }
-                                
+//                                 }                               
 //                                 // Clear the buffer for the next message
 //                                 uart_buffer.clear();
 //                             }
@@ -399,25 +408,20 @@ static void uart_event_task(void *pvParameters)
 //                     uart_flush_input(UART_NUM);
 //                     xQueueReset(uart_queue);
 //                     break;
-
 //                 case UART_BUFFER_FULL:
 //                     ESP_LOGI(TAG, "UART Buffer Full");
 //                     uart_flush_input(UART_NUM);
 //                     xQueueReset(uart_queue);
 //                     break;
-
 //                 case UART_BREAK:
 //                     ESP_LOGI(TAG, "UART Break");
 //                     break;
-
 //                 case UART_PARITY_ERR:
 //                     ESP_LOGI(TAG, "UART Parity Error");
 //                     break;
-
 //                 case UART_FRAME_ERR:
 //                     ESP_LOGI(TAG, "UART Frame Error");
 //                     break;
-
 //                 default:
 //                     ESP_LOGI(TAG, "UART event type: %d", event.type);
 //                     break;
@@ -466,15 +470,20 @@ extern "C" void app_main(void)
     blink_led();
     wait_for_ip();   // Wait for IP address
 
-    // Time Synchronization
-    blink_led();
-    set_timezone();  // Set the timezone
-    obtain_time();   // Obtain time from NTP server
-    print_current_time(); // Print the current time
-
     // MQTT Initialization
     blink_led();
     mqtt_app_start(); // Start the MQTT client
+
+    // Time Synchronization
+    blink_led();
+    set_timezone();  // Set the timezone
+        while (!time_synced) {
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+    }
+    // obtain_time();   // Obtain time from NTP server
+    print_current_time(); // Print the current time
+
+
 
     // UART Initialization
     blink_led();
@@ -489,10 +498,10 @@ extern "C" void app_main(void)
     
     // Start UART Event Task
     blink_led();
-    xTaskCreate(json_processing_task, "json_processing_task", 10000, NULL, 12, NULL);
+    xTaskCreate(json_processing_task, "json_processing_task", 30000, NULL, 12, NULL);
     // Start UART Event Task
     blink_led();
-    xTaskCreate(uart_event_task, "uart_event_task", 10000, NULL, 10, NULL);
+    xTaskCreate(uart_event_task, "uart_event_task", 30000, NULL, 10, NULL);
     
     gpio_set_level(LED_PIN, 0);  // Pull low
 

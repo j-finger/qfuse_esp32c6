@@ -8,6 +8,7 @@
 #include <cstring>                
 #include <cstdint>
 
+
 static const char *TAG = "ESP_coms";
 
 /* ----- TIME ----- */
@@ -27,6 +28,10 @@ void initialize_sntp(void)
     esp_sntp_setservername(0, "pool.ntp.org");  // You can specify other NTP servers if needed
     esp_sntp_init();
 }
+
+
+
+
 
 void obtain_time(void)
 {
