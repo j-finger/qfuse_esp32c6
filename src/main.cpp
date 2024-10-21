@@ -41,14 +41,15 @@ static int s_retry_num = 0;
 /* ----- MQTT MACROS ----- */
 static esp_mqtt_client_handle_t mqtt_client = NULL;
 #define MQTT_URI       "mqtt://192.168.86.20:1883"
+// #define MQTT_URI       "mqtt://192.168.4.1:1883"
 
 /* ----- UART MACROS ----- */
 // Declare UART Pins, Baud Rate, Buffer Size and Queue
 #define UART_NUM UART_NUM_1
 #define TXD_PIN GPIO_NUM_16
 #define RXD_PIN GPIO_NUM_17
-#define BAUD_RATE 115200
-#define UART_BUFFER_SIZE (6024) // UART Buffer Sizes
+#define BAUD_RATE 1152000
+#define UART_BUFFER_SIZE (25024) // UART Buffer Sizes
 static QueueHandle_t uart_queue; // UART Event Queue
 
 #define LED_PIN GPIO_NUM_15
@@ -406,146 +407,7 @@ void uart_read(char* message, size_t max_length) {
     }
 }
 
-// // Function to handle UART events
-// static void uart_event_task(void *pvParameters)
-// {
-//     uart_event_t event;
-
-//     // Allocate memory for the UART buffer
-//     uint8_t* dtmp = (uint8_t*) malloc(UART_BUFFER_SIZE);
-
-//     // Check if memory allocation was successful
-//     if (dtmp == NULL) {
-//         ESP_LOGE(TAG, "Failed to allocate memory for UART buffer");
-//         vTaskDelete(NULL);
-//     }
-
-//     std::string uart_buffer = ""; // Initialize an empty buffer to accumulate incoming data
-
-//     while (true) {
-//         // Wait for UART event.
-//         if (xQueueReceive(uart_queue, (void * )&event, (TickType_t)portMAX_DELAY)) {
-//             switch (event.type) {
-//                 // Event of UART receiving data
-//                 case UART_DATA: {
-//                     // Log the number of bytes received
-//                     ESP_LOGI(TAG, "[UART DATA]: %d bytes", event.size);
-//                     int read_len = uart_read_bytes(UART_NUM, dtmp, event.size, portMAX_DELAY);
-
-//                     // Check for errors
-//                     if (read_len < 0) {
-//                         ESP_LOGE(TAG, "Error reading UART data");
-//                         break;
-//                     }
-
-//                     // Append received data to the buffer
-//                     uart_buffer.append((char*)dtmp, read_len);
-//                     ESP_LOGI(TAG, "Buffer Content: %s", uart_buffer.c_str());
-
-//                     // Attempt to extract complete JSON objects from the buffer
-//                     size_t start_pos = uart_buffer.find('{');
-//                     while (start_pos != std::string::npos) {
-//                         int brace_count = 0;
-//                         size_t end_pos = start_pos;
-//                         bool complete = false;
-
-//                         // Traverse the buffer to find the matching closing brace
-//                         for (; end_pos < uart_buffer.size(); end_pos++) {
-//                             if (uart_buffer[end_pos] == '{') { // If an opening brace is found, increment the brace count
-//                                 brace_count++;
-//                             } else if (uart_buffer[end_pos] == '}') { // If a closing brace is found, decrement the brace count
-//                                 brace_count--;
-//                                 if (brace_count == 0) {
-//                                     complete = true;
-//                                     break;
-//                                 }
-//                             }
-//                         }
-
-//                         if (complete) {
-//                             // Extract the complete JSON substring
-//                             std::string json_str = uart_buffer.substr(start_pos, end_pos - start_pos + 1);
-//                             ESP_LOGI(TAG, "Attempting to parse JSON: %s", json_str.c_str());
-
-//                             // Validate and parse the JSON
-//                             if (json::accept(json_str)) {
-//                                 // Parse the JSON string into a JSON object
-//                                 json received_json = json::parse(json_str);
-//                                 ESP_LOGI(TAG, "Parsed JSON successfully");
-
-//                                 // Determine the MQTT topic based on the content of the JSON
-//                                 std::string topic;
-//                                 if (received_json.contains("data")) {
-//                                     topic = "sensor/data";
-//                                 } else if (received_json.contains("settings")) {
-//                                     topic = "sensor/settings";
-//                                 } else if (received_json.contains("log")) {
-//                                     topic = "sensor/logs";
-//                                 } else {
-//                                     topic = "sensor/data";
-//                                 }
-
-//                                 // Publish the JSON data via MQTT
-//                                 if (mqtt_client != NULL) {
-//                                     mqtt_publish(mqtt_client, topic, received_json);
-//                                 } else {
-//                                     ESP_LOGE(TAG, "MQTT client is not initialized");
-//                                 }
-//                             } else {
-//                                 ESP_LOGE(TAG, "Received invalid JSON");
-//                             }
-
-
-
-
-//                             uart_buffer.erase(0, end_pos + 1); // Erase the processed JSON from the buffer
-//                             start_pos = uart_buffer.find('{'); // Look for the next JSON object in the buffer
-//                         } else {
-//                             // Incomplete JSON; wait for more data
-//                             break;
-//                         }
-                    
-                    
-//                     }
-
-//                     break;
-//                 }
-//                 // Handle other UART events as needed
-//                 case UART_FIFO_OVF: // If a FIFO overflow occurs, flush the input buffer
-//                     ESP_LOGI(TAG, "UART FIFO Overflow");
-//                     uart_flush_input(UART_NUM);
-//                     xQueueReset(uart_queue);
-//                     break;
-
-//                 case UART_BUFFER_FULL:  // If the buffer is full, flush the input buffer
-//                     ESP_LOGI(TAG, "UART Buffer Full");
-//                     uart_flush_input(UART_NUM);
-//                     xQueueReset(uart_queue);
-//                     break;
-
-//                 case UART_BREAK: // If a UART break occurs, log the event
-//                     ESP_LOGI(TAG, "UART Break");
-//                     break;
-
-//                 case UART_PARITY_ERR: // If a UART parity error occurs, log the event
-//                     ESP_LOGI(TAG, "UART Parity Error");
-//                     break;
-
-//                 case UART_FRAME_ERR: // If a UART frame error occurs, log the event
-//                     ESP_LOGI(TAG, "UART Frame Error");
-//                     break;
-
-//                 default: // Else log the event type
-//                     ESP_LOGI(TAG, "UART event type: %d", event.type);
-//                     break;
-//             }
-//         }
-//     }
-//     free(dtmp);
-//     vTaskDelete(NULL);
-// }
-
-
+// Function to handle UART events
 static void uart_event_task(void *pvParameters)
 {
     uart_event_t event;
@@ -562,8 +424,8 @@ static void uart_event_task(void *pvParameters)
                         if (incoming_byte == '\n') {
                             // End of JSON message
                             if (!uart_buffer.empty()) {
-                                ESP_LOGI(TAG, "Received complete JSON: %s", uart_buffer.c_str());
-                                
+                                // ESP_LOGI(TAG, "Received complete JSON: %s", uart_buffer.c_str());
+                                printf("Received complete JSON\n");
                                 // Check if the received string is valid JSON
                                 if (json::accept(uart_buffer)) {
                                     // Parse the JSON string
@@ -574,7 +436,8 @@ static void uart_event_task(void *pvParameters)
                                     mqtt_publish(mqtt_client, "sensor/data", received_json);
                                 }
                                 else {
-                                    ESP_LOGE(TAG, "JSON Parse Error: Invalid JSON format");
+                                    // ESP_LOGE(TAG, "JSON Parse Error: Invalid JSON format");
+                                    printf("JSON Parse Error: Invalid JSON format\n");
                                 }
                                 
                                 // Clear the buffer for the next message
