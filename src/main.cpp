@@ -17,13 +17,15 @@
 
 #include "wifi/wifi.h"
 #include "time/timesync.h"
+// #include "config.h"
 
 // Declare device ID
 static const char *TAG = "ESP_coms";
 
 /* ----- MQTT MACROS ----- */
 static esp_mqtt_client_handle_t mqtt_client = NULL;
-#define MQTT_URI       "mqtt://192.168.86.20:1883"
+#define MQTT_URI       "mqtt://192.168.4.1:1883"
+// #define MQTT_URI       "mqtt://192.168.86.20:1883"
 #define MQTT_BUFF_IN_SIZE (2048)
 #define MQTT_BUFF_OUT_SIZE (26384)
 #define MQTT_OUTBOX_SIZE (16384)
