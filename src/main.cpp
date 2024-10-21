@@ -1,3 +1,30 @@
+// #include "freertos/FreeRTOS.h"
+// #include "freertos/task.h"
+// #include "freertos/queue.h"
+// #include "esp_log.h"
+// #include "driver/gpio.h" 
+// #include "driver/uart.h"
+
+// #include "nvs_flash.h"
+// #include "esp_event.h"
+// #include "esp_system.h"
+
+// #include "esp_wifi.h"
+// #include "esp_netif.h"
+// #include "esp_sntp.h"
+
+// #include "mqtt_client.h"
+
+
+// #include <stdio.h>
+// #include <string>
+// #include <string.h>
+// #include <time.h>
+// #include <ctime>
+// #include <cstring>
+// #include <cstdio>
+
+// main.cpp
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -5,16 +32,9 @@
 #include "driver/gpio.h" 
 #include "driver/uart.h"
 
-#include "nvs_flash.h"
-#include "esp_event.h"
 #include "esp_system.h"
 
-#include "esp_wifi.h"
-#include "esp_netif.h"
-#include "esp_sntp.h"
-
 #include "mqtt_client.h"
-
 
 #include <stdio.h>
 #include <string>
@@ -28,19 +48,21 @@
 #include "json.hpp"
 using json = nlohmann::json;
 
+#include "wifi/wifi.h"
+#include "time/timesync.h"
+
+
 // Declare device ID
 static const char *TAG = "ESP_coms";
 
 
-/* ----- WIFI MACROS ----- */
-
-#include "config.h" // Include Wi-Fi SSID and Password
-#define MAXIMUM_RETRY  5
-static int s_retry_num = 0;
-
 /* ----- MQTT MACROS ----- */
 static esp_mqtt_client_handle_t mqtt_client = NULL;
 #define MQTT_URI       "mqtt://192.168.86.20:1883"
+#define MQTT_BUFF_IN_SIZE (16384)
+#define MQTT_BUFF_OUT_SIZE (2048)
+#define MQTT_OUTBOX_SIZE (16384)
+
 // #define MQTT_URI       "mqtt://192.168.4.1:1883"
 
 /* ----- UART MACROS ----- */
@@ -49,178 +71,25 @@ static esp_mqtt_client_handle_t mqtt_client = NULL;
 #define TXD_PIN GPIO_NUM_16
 #define RXD_PIN GPIO_NUM_17
 #define BAUD_RATE 921600
-#define UART_BUFFER_SIZE (16384) // UART Buffer Sizes
+#define UART_RX_BUFFER_SIZE (16384) // Reduced RX buffer size
+#define UART_TX_BUFFER_SIZE (2048) // Reduced TX buffer size
 
 static QueueHandle_t uart_queue; // UART Event Queue
 static QueueHandle_t json_queue; // JSON Queue
 
-
 #define LED_PIN GPIO_NUM_15
-/* ----- WIFI ----- */
 
-// Wi-Fi Event Handler
-static void wifi_event_handler(void* arg, esp_event_base_t event_base,
-                               int32_t event_id, void* event_data){
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        if (s_retry_num < MAXIMUM_RETRY) {
-            esp_wifi_connect();
-            s_retry_num++;
-            ESP_LOGI(TAG, "Retrying to connect to the AP...");
-        } else {
-            ESP_LOGI(TAG, "Failed to connect to the AP");
-        }
-        ESP_LOGI(TAG, "Disconnected from Wi-Fi");
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        s_retry_num = 0;
-        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
-        ESP_LOGI(TAG, "Got IP Address: " IPSTR, IP2STR(&event->ip_info.ip));
-    }
-}
-
-// Initialize Wi-Fi in Station Mode
-void wifi_init_sta(void){
-    // Initialize NVS
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
-        ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(ret);
-
-    // Initialize the underlying TCP/IP stack
-    ESP_ERROR_CHECK(esp_netif_init());
-
-    // Create the default event loop
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-
-    // Create a default Wi-Fi station
-    esp_netif_create_default_wifi_sta();
-
-    // Initialize Wi-Fi with default configurations
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-
-    // Register the event handler
-    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT,
-                                               ESP_EVENT_ANY_ID,
-                                               &wifi_event_handler,
-                                               NULL));
-    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT,
-                                               IP_EVENT_STA_GOT_IP,
-                                               &wifi_event_handler,
-                                               NULL));
-
-    // Configure the Wi-Fi connection and security
-    wifi_config_t wifi_config = {};
-    strncpy((char *)wifi_config.sta.ssid, WIFI_SSID, sizeof(wifi_config.sta.ssid));
-    strncpy((char *)wifi_config.sta.password, WIFI_PASS, sizeof(wifi_config.sta.password));
-
-    wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
-    wifi_config.sta.pmf_cfg.capable = true;
-    wifi_config.sta.pmf_cfg.required = false;
-
-    // Set the Wi-Fi mode and configuration
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
-
-    // Start Wi-Fi
-    ESP_ERROR_CHECK(esp_wifi_start());
-
-    ESP_LOGI(TAG, "Wi-Fi initialization finished.");
-}
-
-// Function to Wait for IP Address
-void wait_for_ip()
-{
-    ESP_LOGI(TAG, "Waiting for IP address...");
-
-    esp_netif_ip_info_t ip_info;
-    while (1) {
-        vTaskDelay(pdMS_TO_TICKS(2000));
-        esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-        if (netif == NULL) {
-            ESP_LOGE(TAG, "Failed to get network interface handle.");
-            continue;
-        }
-        esp_netif_get_ip_info(netif, &ip_info);
-        if (ip_info.ip.addr != 0) {
-            break;
-        }
-        ESP_LOGI(TAG, "IP not yet obtained.");
-    }
-
-    ESP_LOGI(TAG, "Connected with IP Address: " IPSTR, IP2STR(&ip_info.ip));
-}
-
-
-/* ----- TIME ----- */
-
-// Set Timezone to AEST-10
-void set_timezone(void)
-{
-    setenv("TZ", "AEST-10", 1);
-    tzset();
-}
-
-// Initialize SNTP
-void initialize_sntp(void)
-{
-    ESP_LOGI(TAG, "Initializing SNTP");
-    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
-    esp_sntp_setservername(0, "pool.ntp.org");  // You can specify other NTP servers if needed
-    esp_sntp_init();
-}
-
-// Obtain Time from NTP Server
-void obtain_time(void)
-{
-    initialize_sntp();
-
-    // Wait for time to be set
-    time_t now = 0;
-    struct tm timeinfo = {};
-    int retry = 0;
-    const int retry_count = 10;
-
-    while (timeinfo.tm_year < (2023 - 1900) && ++retry < retry_count) {
-        ESP_LOGI(TAG, "Waiting for system time to be set... (%d/%d)", retry, retry_count);
-        vTaskDelay(pdMS_TO_TICKS(2000));
-        time(&now);
-        localtime_r(&now, &timeinfo);
-    }
-
-    if (retry == retry_count) {
-        ESP_LOGI(TAG, "Failed to get time over NTP.");
-    } else {
-        ESP_LOGI(TAG, "System time is set.");
-    }
-}
-
-// Print the Current Time in POSIX format
-void print_current_time(void)
-{
-    time_t now;
-    struct tm timeinfo;
-    time(&now);
-    localtime_r(&now, &timeinfo);
-
-    char strftime_buf[64];
-    strftime(strftime_buf, sizeof(strftime_buf), "%c", &timeinfo);
-    ESP_LOGI(TAG, "The current date/time is: %s", strftime_buf);
-}
 
 /* ----- JSON ----- */
 
 // Function to append the current UNIX epoch time to a JSON object
+    //TODO: Convert to manual string manipulation
 void json_append_time(json& json_obj) {
     // Get current time as UNIX epoch
     time_t current_time = time(nullptr);
+    // TODO: Just add onto the end of the string in between the last curly brace and the null terminator `...}\0` -> `...,"time":1620000000}\0`
     json_obj["time"] = current_time;
 }
-
 
 
 /* ----- MQTT ----- */
@@ -241,6 +110,7 @@ void mqtt_publish(esp_mqtt_client_handle_t client, const std::string& topic, jso
     json_append_time(json_obj);
 
     // Serialize JSON object to string
+    // TODO: Implement manual JSON creation here
     std::string json_str = json_obj.dump();
 
     // Publish JSON string to the specified MQTT topic
@@ -283,13 +153,12 @@ void mqtt_handle_connection(esp_mqtt_event_handle_t event) {
         // Subscribe to MQTT topics
         mqtt_sub_topics(client);
 
-        // Optionally publish initial data if needed
-        // For example, send a connection log
+        // TODO: Implement manual JSON creation here
         json log_json;
         log_json["device"] = "E46338809B472231"; // Replace with your device ID
         log_json["log"] = "Device connected to MQTT broker";
-        json_append_time(log_json);
         mqtt_publish(client, "sensor/logs", log_json);
+        printf("Device connected to MQTT broker\n");
 
     } else if (event->event_id == MQTT_EVENT_DISCONNECTED) {
         ESP_LOGI(TAG, "MQTT_EVENT_DISCONNECTED");
@@ -332,10 +201,10 @@ void mqtt_app_start(void)
     esp_mqtt_client_config_t mqtt_cfg = {};
     mqtt_cfg.broker.address.uri = MQTT_URI;  // Set each field individually
 
-    mqtt_cfg.outbox.limit = 65536;
+    mqtt_cfg.outbox.limit = MQTT_OUTBOX_SIZE;
 
-    mqtt_cfg.buffer.size = 16384;     // Input buffer size
-    mqtt_cfg.buffer.out_size = 16384; // Output buffer size
+    mqtt_cfg.buffer.size = MQTT_BUFF_IN_SIZE;     // Input buffer size
+    mqtt_cfg.buffer.out_size = MQTT_BUFF_OUT_SIZE; // Output buffer size
 
     mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
 
@@ -388,7 +257,7 @@ void uart_initialize(void) {
 
     ESP_ERROR_CHECK(uart_param_config(uart_num, &uart_config)); // Configure UART parameters
     ESP_ERROR_CHECK(uart_set_pin(uart_num, TXD_PIN, RXD_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE)); // Set UART pins
-    ESP_ERROR_CHECK(uart_driver_install(uart_num, UART_BUFFER_SIZE, UART_BUFFER_SIZE, 10, &uart_queue, 0)); // Install UART driver using an event queue here
+    ESP_ERROR_CHECK(uart_driver_install(uart_num, UART_RX_BUFFER_SIZE, UART_TX_BUFFER_SIZE, 10, &uart_queue, 0)); // Install UART driver using an event queue here
 
     uart_enable_rx_intr(uart_num); // Configure UART to receive interrupt on RX full
 }
@@ -417,6 +286,7 @@ void uart_read(char* message, size_t max_length) {
 
 static void json_processing_task(void *pvParameters)
 {
+    // TODO: Implement manual JSON parsing here
     std::string* json_str;
     while (true) {
         if (xQueueReceive(json_queue, &json_str, portMAX_DELAY)) {
@@ -585,13 +455,10 @@ extern "C" void app_main(void)
     
     init_led_pin();
     
-
-
-
     blink_led();
     // Sleep for 8 seconds before starting
     vTaskDelay(8000 / portTICK_PERIOD_MS);
-    ESP_LOGI(TAG, "Starting ESP32C6 UART Example");
+    printf("Starting ESP32C6 UART Example\n");
     
     // Wi-Fi Initialization
     blink_led();
@@ -609,15 +476,6 @@ extern "C" void app_main(void)
     blink_led();
     mqtt_app_start(); // Start the MQTT client
 
-    // Log MQTT initialization to sensor/log
-    blink_led();
-    json log_json;
-    log_json["device"] = "E46338809B472231"; // Replace with your device ID
-    log_json["time"] = time(nullptr);
-    log_json["log"] = "MQTT client started";
-    mqtt_publish(mqtt_client, "sensor/logs", log_json);
-    ESP_LOGI(TAG, "MQTT client started");
-
     // UART Initialization
     blink_led();
     uart_initialize(); // Initialize UART
@@ -631,10 +489,10 @@ extern "C" void app_main(void)
     
     // Start UART Event Task
     blink_led();
-    xTaskCreate(json_processing_task, "json_processing_task", 16384, NULL, 12, NULL);
+    xTaskCreate(json_processing_task, "json_processing_task", 10000, NULL, 12, NULL);
     // Start UART Event Task
     blink_led();
-    xTaskCreate(uart_event_task, "uart_event_task", 16384, NULL, 10, NULL);
+    xTaskCreate(uart_event_task, "uart_event_task", 10000, NULL, 10, NULL);
     
     gpio_set_level(LED_PIN, 0);  // Pull low
 
